@@ -1,0 +1,12 @@
+numpy==1.26.4
+scipy>=1.12.0
+torch==2.2.2
+transformers==4.39.3
+shap==0.45.1
+matplotlib==3.8.4
+pandas==2.2.2
+pytest==8.2.2
+jupyter==1.0.0
+ipykernel==6.29.4
+sentence-transformers>=2.6.0
+scikit-learn>=1.4.0
