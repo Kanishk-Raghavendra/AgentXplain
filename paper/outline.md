@@ -11,8 +11,9 @@ LLM agents increasingly rely on tool selection to answer queries, yet existing e
 
 ### 1.2 Contributions
 1. We formally define the prompt-to-tool attribution problem and distinguish it from existing response-level tool attribution
-2. We introduce a self-contained causal benchmark (n=300, 3 splits: standard, hard/distractor, paraphrase) with planted ground-truth trigger spans, enabling automated faithfulness evaluation without human annotators
+2. We introduce a self-contained causal benchmark (n=300, 4 splits: standard, hard/distractor, paraphrase, negation) with planted ground-truth trigger spans, enabling automated faithfulness evaluation without human annotators
 3. We provide the first empirical dissociation analysis showing cases where tool-level attribution (AgentSHAP-style) succeeds but span attribution fails and vice versa, demonstrating non-redundancy
+4. We package the full workflow into a reproducible local pipeline that generates data, runs seeded experiments, evaluates metrics, and renders figures without notebooks
 
 ### 1.3 Research Questions
 - RQ1: Can attention rollout, gradient saliency, and token-masking SHAP faithfully localise the prompt spans that causally trigger tool selection, as measured by span IoU and top-k hit rate on planted trigger benchmarks?
@@ -43,7 +44,7 @@ LLM agents increasingly rely on tool selection to answer queries, yet existing e
 
 ## 3. Methodology
 ### 3.1 Agent Setup
-- Routing model: Mistral-7B-Instruct-v0.2 with structured decision output.
+- Routing model: Qwen/Qwen2.5-0.5B-Instruct with fallback to TinyLlama/TinyLlama-1.1B-Chat-v1.0 and deterministic mock routing.
 - Tools: web_search, calculator, code_executor plus fallback behavior for negation traces.
 - Trace artifacts: selected tool, argument fields, token ids, attention tensors, and decision score distribution.
 
@@ -91,6 +92,7 @@ LLM agents increasingly rely on tool selection to answer queries, yet existing e
 ### 5.1 Core Evaluation
 - Compare attention rollout, gradient saliency, token-masking SHAP, and contrastive variants.
 - Include AgentSHAP-style tool-level baseline and span-localization baselines.
+- End-to-end orchestration lives in `experiments/full_pipeline.py`, which generates the benchmark, runs seeded experiments, evaluates metrics, runs dissociation, and renders figures.
 
 ### 5.2 Dissociation Analysis
 For each benchmark trace, compute both AgentSHAP-style tool-level score and AgentXplain span attribution. Categorise each trace into one of four quadrants:
@@ -105,11 +107,17 @@ Report the 2x2 confusion matrix and chi-squared test for independence. The tool 
 - Significance: paired t-test between each method and the random baseline.
 - Stronger baseline: add a TF-IDF keyword similarity baseline (not just lexical keyword match) as a non-trivial span localisation baseline.
 
+### 5.4 Observed Results Snapshot
+- Attention rollout, gradient saliency, token SHAP, and contrastive attribution each achieve Hit@10 of 0.997 on the current benchmark run.
+- The best sufficiency score among the attribution methods is gradient saliency at 0.298, while contrastive attribution reaches the strongest comprehensiveness among the attribution methods at 0.058.
+- The dissociation matrix is heavily imbalanced toward span hits with tool disagreement: 137 tool-correct/span-hit, 162 tool-wrong/span-hit, 0 tool-correct/span-miss, and 1 tool-wrong/span-miss.
+
 ## 6. Reproducibility
-- Model: Mistral-7B-Instruct-v0.2, CPU float32 / GPU float16.
+- Model: Qwen/Qwen2.5-0.5B-Instruct with fallback to TinyLlama/TinyLlama-1.1B-Chat-v1.0; CPU float32 by default.
 - Benchmark: n=300, seed=42, fully regeneratable.
-- All results: python experiments/eval_metrics.py --results results/output.json --seeds 42 43 44
-- Runtime estimate: ~X hours CPU / ~Y hours GPU (fill in after running).
+- Full pipeline: python experiments/full_pipeline.py --n 300 --benchmark-seed 42 --seeds 42 43 44
+- Validation: project tests pass under the repo venv.
+- Runtime estimate: report the measured end-to-end time from the pipeline run rather than a placeholder.
 
 ## 7. Failure Taxonomy and Discussion
 ### 7.1 Failure Taxonomy

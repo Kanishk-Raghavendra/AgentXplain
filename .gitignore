@@ -20,8 +20,12 @@ env/
 .ipynb_checkpoints/
 
 # Local outputs
-data/synthetic/benchmark.json
-results/
+# Generated benchmark artifacts
+data/synthetic/benchmark*.json
+
+# Generated run artifacts
+results/*
+!results/.gitkeep
 
 # OS
 .DS_Store

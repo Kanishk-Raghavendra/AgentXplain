@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 from html import escape
+from pathlib import Path
 from typing import Sequence
 
 import matplotlib.pyplot as plt
@@ -129,3 +132,85 @@ def plot_attention_heatmap(matrix: np.ndarray, tokens: Sequence[str], max_tokens
     fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
     plt.tight_layout()
     return fig, ax
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse CLI args for visualization generation."""
+    parser = argparse.ArgumentParser(description="Generate AgentXplain visualizations")
+    parser.add_argument("--results", type=Path, required=True, help="Attribution results JSON")
+    parser.add_argument("--save", type=Path, required=True, help="Output directory")
+    return parser.parse_args()
+
+
+def _sanitize_method(name: str) -> str:
+    """Make method names filesystem-safe."""
+    return name.replace(" ", "_").replace("/", "_")
+
+
+def generate_visualizations(results_path: Path, out_dir: Path) -> None:
+    """Generate the figure artifacts from a results JSON file."""
+    records = json.loads(results_path.read_text(encoding="utf-8"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    summary_rows = []
+    method_names = set()
+
+    for idx, rec in enumerate(records, start=1):
+        trace_name = f"trace_{idx:03d}"
+        attributions = rec.get("attributions", {}) if isinstance(rec, dict) else {}
+
+        # Create highlight HTML from attention_rollout if present, otherwise first method.
+        method_for_html = "attention_rollout" if "attention_rollout" in attributions else next(iter(attributions), None)
+        if method_for_html:
+            ranked = attributions[method_for_html]
+            tokens = [tok for tok, _ in ranked]
+            scores = [float(score) for _, score in ranked]
+            html = token_highlight_html(tokens, scores)
+            (out_dir / f"highlight_{trace_name}.html").write_text(html, encoding="utf-8")
+
+        for method, ranked in attributions.items():
+            method_names.add(method)
+            tokens = [tok for tok, _ in ranked]
+            scores = [float(score) for _, score in ranked]
+
+            fig, _ = plot_token_bar(tokens, scores, top_k=min(15, max(1, len(tokens))))
+            fig.savefig(out_dir / f"bar_{trace_name}_{_sanitize_method(method)}.png", dpi=200)
+            plt.close(fig)
+
+            trig = str(rec.get("planted_trigger", "")).lower().split()
+            top10 = [str(tok).lower().strip("▁Ġ.,?!") for tok, _ in ranked[:10]]
+            hit = 1.0 if set(trig) & set(top10) else 0.0
+            summary_rows.append((trace_name, method, hit))
+
+    # Summary heatmap across methods/traces using trigger-hit in top10.
+    method_list = sorted(method_names)
+    trace_list = sorted({t for t, _, _ in summary_rows})
+    heat = np.zeros((len(trace_list), len(method_list)), dtype=np.float32)
+    trace_idx = {t: i for i, t in enumerate(trace_list)}
+    method_idx = {m: i for i, m in enumerate(method_list)}
+    for t, m, v in summary_rows:
+        heat[trace_idx[t], method_idx[m]] = v
+
+    fig, ax = plt.subplots(figsize=(max(6, len(method_list) * 1.2), max(4, len(trace_list) * 0.6)), dpi=200)
+    im = ax.imshow(heat, cmap="YlOrRd", aspect="auto", vmin=0.0, vmax=1.0)
+    ax.set_xticks(range(len(method_list)))
+    ax.set_xticklabels(method_list, rotation=45, ha="right", fontsize=8)
+    ax.set_yticks(range(len(trace_list)))
+    ax.set_yticklabels(trace_list, fontsize=8)
+    ax.set_title("Trigger Hit@10 Heatmap")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    fig.savefig(out_dir / "summary_heatmap.png", dpi=200)
+    plt.close(fig)
+
+    print(f"Saved visualization artifacts to {out_dir}")
+
+
+def main() -> None:
+    """CLI entrypoint for generating all figure artifacts."""
+    args = parse_args()
+    generate_visualizations(args.results, args.save)
+
+
+if __name__ == "__main__":
+    main()
