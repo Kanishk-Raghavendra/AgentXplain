@@ -118,6 +118,40 @@ TOOL_SPECS: Dict[str, Dict[str, Sequence[str]]] = {
 
 TOOL_FALLBACK = "none"
 
+DISTRACTOR_POOLS: Dict[str, Sequence[str]] = {
+    "calculator": [
+        "calculate",
+        "multiply",
+        "multiplied",
+        "divide",
+        "sum",
+        "percent",
+        "times",
+        "plus",
+        "minus",
+        "compute",
+    ],
+    "web_search": [
+        "search",
+        "find",
+        "lookup",
+        "latest",
+        "news",
+        "current",
+        "who",
+        "what",
+    ],
+    "code_executor": [
+        "code",
+        "script",
+        "function",
+        "python",
+        "program",
+        "implement",
+        "algorithm",
+    ],
+}
+
 
 def _split_counts(n: int) -> Dict[str, int]:
     """Compute split counts for standard, hard, paraphrase, and negation.
@@ -171,12 +205,15 @@ def _sample_distractors(tool: str, rng: random.Random) -> List[str]:
     if tool not in TOOL_SPECS:
         raise ValueError(f"Unknown tool: {tool}")
 
-    # Use subtle cross-domain distractors requested for each domain.
-    if tool == "calculator":
-        return ["find", rng.choice(["latest", "news", "lookup"])]
-    if tool == "web_search":
-        return [rng.choice(["145 * 37", "18+24", "7/3"]), rng.choice(["calculate", "sum"])]
-    return ["calculate", rng.choice(["sum", "divide", "percent"])]
+    allowed_domains = [domain for domain in DISTRACTOR_POOLS if domain != tool]
+    candidates: List[str] = []
+    for domain in allowed_domains:
+        candidates.extend(DISTRACTOR_POOLS[domain])
+
+    if len(candidates) < 2:
+        raise ValueError("insufficient cross-domain distractor candidates")
+
+    return rng.sample(candidates, 2)
 
 
 def _hard_lexical_distractors(tool: str) -> List[str]:
@@ -192,9 +229,9 @@ def _hard_lexical_distractors(tool: str) -> List[str]:
         ValueError: If tool is unknown.
     """
     mapping = {
-        "calculator": ["find-expression", "lookup_value"],
-        "web_search": ["search for 24*19", "latest calculation result"],
-        "code_executor": ["calculate in python", "find algorithm"],
+        "calculator": ["search keyword", "python function"],
+        "web_search": ["compute value", "algorithm script"],
+        "code_executor": ["latest lookup", "calculate sum"],
     }
     if tool not in mapping:
         raise ValueError(f"Unknown tool: {tool}")
@@ -241,6 +278,13 @@ def _build_trace(
     )
 
 
+def _ensure_trigger_in_query(trigger: str, query: str) -> str:
+    """Ensure the exact trigger phrase appears as a substring in query text."""
+    if trigger.lower() in query.lower():
+        return query
+    return f"{query} Trigger phrase: {trigger}."
+
+
 def generate_benchmark(n: int = 300, seed: int = 42) -> List[BenchmarkTrace]:
     """Generate synthetic benchmark traces.
 
@@ -275,6 +319,7 @@ def generate_benchmark(n: int = 300, seed: int = 42) -> List[BenchmarkTrace]:
                 distractors = _hard_lexical_distractors(tool)
                 template = rng.choice(list(spec["templates"]))
                 query = template.format(trigger=trigger, hint=hint, d1=distractors[0], d2=distractors[1])
+                query = _ensure_trigger_in_query(trigger, query)
                 trace = _build_trace(idx, split, tool, trigger, hint, distractors, query, paraphrase_of=None)
             elif split == "paraphrase":
                 base_id = max(0, idx - 1)
@@ -285,9 +330,11 @@ def generate_benchmark(n: int = 300, seed: int = 42) -> List[BenchmarkTrace]:
                     query = f"I need current information regarding {hint}; avoid direct calculation of 145 * 37."
                 else:
                     query = f"{phrase} in Python that handles: {hint}; mention calculate only as context."
+                query = _ensure_trigger_in_query(trigger, query)
                 trace = _build_trace(idx, split, tool, trigger, hint, distractors, query, paraphrase_of=base_id)
             elif split == "negation":
                 query = rng.choice(list(spec["negation"]))
+                query = _ensure_trigger_in_query(trigger, query)
                 trace = _build_trace(
                     idx,
                     split,
@@ -301,6 +348,7 @@ def generate_benchmark(n: int = 300, seed: int = 42) -> List[BenchmarkTrace]:
             else:
                 template = rng.choice(list(spec["templates"]))
                 query = template.format(trigger=trigger, hint=hint, d1=distractors[0], d2=distractors[1])
+                query = _ensure_trigger_in_query(trigger, query)
                 trace = _build_trace(idx, split, tool, trigger, hint, distractors, query, paraphrase_of=None)
 
             traces.append(trace)
@@ -417,9 +465,20 @@ def main() -> None:
     """
     args = parse_args()
     traces = generate_benchmark(n=args.n, seed=args.seed)
-    save_split_benchmarks(traces, args.out_dir)
-    save_benchmark(traces, args.out)
-    print(f"Saved {len(traces)} traces to {args.out}")
+    out_path = args.out
+    out_dir = args.out_dir
+
+    # Support `--out data/synthetic` by treating it as the benchmark directory.
+    if out_path.exists() and out_path.is_dir():
+        out_dir = out_path
+        out_path = out_dir / "benchmark_full.json"
+    elif out_path.suffix.lower() != ".json":
+        out_dir = out_path
+        out_path = out_dir / "benchmark_full.json"
+
+    save_split_benchmarks(traces, out_dir)
+    save_benchmark(traces, out_path)
+    print(f"Saved {len(traces)} traces to {out_path}")
 
 
 if __name__ == "__main__":

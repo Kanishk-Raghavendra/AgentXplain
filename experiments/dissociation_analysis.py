@@ -1,4 +1,4 @@
-"""Dissociation analysis between tool-level and span-level attribution outcomes."""
+"""Dissociation analysis for tool-level vs span-level attribution."""
 
 from __future__ import annotations
 
@@ -10,194 +10,109 @@ from typing import Dict, List
 from scipy.stats import chi2_contingency
 
 
-def _matrix_counts(records: List[Dict]) -> Dict[str, int]:
-    """Build 2x2 dissociation counts from records.
+def _trigger_hit_attention(trace: Dict[str, object]) -> bool:
+    """Check whether trigger words appear in top-10 attention rollout tokens."""
+    trigger = str(trace.get("planted_trigger", "")).lower().split()
+    attrs = trace.get("attributions", {})
+    ranking = attrs.get("attention_rollout", []) if isinstance(attrs, dict) else []
+    top10 = [str(tok).lower().strip("▁Ġ.,?!") for tok, _ in ranking[:10]]
+    return bool(set(trigger) & set(top10))
 
-    Args:
-        records: Trace-level result dictionaries.
 
-    Returns:
-        Dictionary with quadrant counts.
+def analyze(records: List[Dict[str, object]]) -> Dict[str, object]:
+    """Compute dissociation matrix and statistical test."""
+    tt = tf = ft = ff = 0
+    examples_span_wins: List[Dict[str, object]] = []
+    examples_tool_wins: List[Dict[str, object]] = []
 
-    Raises:
-        KeyError: If required boolean keys are absent.
-    """
-    counts = {
-        "both_correct": 0,
-        "tool_correct_span_wrong": 0,
-        "tool_wrong_span_correct": 0,
-        "both_wrong": 0,
-    }
     for rec in records:
-        tool_ok = bool(rec["agentshap_tool_correct"])
-        span_ok = bool(rec["span_hit"])
-        if tool_ok and span_ok:
-            counts["both_correct"] += 1
-        elif tool_ok and not span_ok:
-            counts["tool_correct_span_wrong"] += 1
-        elif (not tool_ok) and span_ok:
-            counts["tool_wrong_span_correct"] += 1
+        tool_correct = bool(rec.get("predicted_tool") == rec.get("correct_tool"))
+        span_hit = _trigger_hit_attention(rec)
+
+        if tool_correct and span_hit:
+            tt += 1
+        elif tool_correct and not span_hit:
+            tf += 1
+            examples_tool_wins.append(rec)
+        elif (not tool_correct) and span_hit:
+            ft += 1
+            examples_span_wins.append(rec)
         else:
-            counts["both_wrong"] += 1
-    return counts
+            ff += 1
 
+    matrix = [[tt, tf], [ft, ff]]
+    chi2, pval, _, _ = chi2_contingency(matrix) if sum(sum(r) for r in matrix) > 0 else (0.0, 1.0, None, None)
 
-def _top_examples(records: List[Dict], tool_ok: bool, span_ok: bool, top_n: int = 10) -> List[Dict]:
-    """Get top informative examples for a dissociation quadrant.
-
-    Args:
-        records: Trace-level result dictionaries.
-        tool_ok: Desired tool-level correctness.
-        span_ok: Desired span-level correctness.
-        top_n: Maximum number of examples to return.
-
-    Returns:
-        List of concise example dictionaries.
-
-    Raises:
-        None.
-    """
-    selected = [
-        rec for rec in records
-        if bool(rec.get("agentshap_tool_correct", False)) == tool_ok
-        and bool(rec.get("span_hit", False)) == span_ok
-    ]
-    ranked = sorted(
-        selected,
-        key=lambda r: float(r.get("informativeness", r.get("confidence_gap", 0.0))),
-        reverse=True,
-    )
-    out: List[Dict] = []
-    for rec in ranked[:top_n]:
-        out.append(
-            {
-                "id": rec.get("id"),
-                "query": rec.get("query"),
-                "split": rec.get("split"),
-                "correct_tool": rec.get("correct_tool"),
-                "predicted_tool": rec.get("predicted_tool"),
-                "planted_trigger": rec.get("planted_trigger"),
-            }
-        )
-    return out
-
-
-def analyze_dissociation(records: List[Dict]) -> Dict[str, object]:
-    """Compute dissociation matrix, chi-squared test, and key examples.
-
-    Args:
-        records: Trace-level result dictionaries.
-
-    Returns:
-        Summary dictionary ready for JSON serialization.
-
-    Raises:
-        ValueError: If records are empty.
-    """
-    if not records:
-        raise ValueError("records cannot be empty")
-
-    counts = _matrix_counts(records)
-    matrix = [
-        [counts["both_correct"], counts["tool_correct_span_wrong"]],
-        [counts["tool_wrong_span_correct"], counts["both_wrong"]],
-    ]
-
-    chi2, p_value, _, _ = chi2_contingency(matrix)
-    key_tool_correct_span_wrong = _top_examples(records, tool_ok=True, span_ok=False, top_n=10)
-    key_tool_wrong_span_correct = _top_examples(records, tool_ok=False, span_ok=True, top_n=10)
-
-    interpretation = (
-        "The two attribution levels appear statistically dependent."
-        if p_value < 0.05
-        else "The two attribution levels appear statistically independent, supporting non-redundancy."
-    )
+    def _compact(items: List[Dict[str, object]], n: int = 5) -> List[Dict[str, object]]:
+        out = []
+        for rec in items[:n]:
+            out.append(
+                {
+                    "id": rec.get("id"),
+                    "query": rec.get("query"),
+                    "split": rec.get("split"),
+                    "correct_tool": rec.get("correct_tool"),
+                    "predicted_tool": rec.get("predicted_tool"),
+                    "planted_trigger": rec.get("planted_trigger"),
+                }
+            )
+        return out
 
     return {
         "confusion_matrix": {
-            "rows": "span_hit [True, False]",
-            "cols": "tool_correct [True, False]",
-            "matrix": matrix,
+            "tool_correct_span_hit": int(tt),
+            "tool_correct_span_miss": int(tf),
+            "tool_wrong_span_hit": int(ft),
+            "tool_wrong_span_miss": int(ff),
         },
-        "quadrants": counts,
-        "chi_squared": {
-            "statistic": float(chi2),
-            "p_value": float(p_value),
-            "interpretation": interpretation,
+        "chi2_statistic": float(chi2),
+        "p_value": float(pval),
+        "key_examples": {
+            "span_correct_tool_wrong": _compact(examples_span_wins),
+            "tool_correct_span_wrong": _compact(examples_tool_wins),
         },
-        "top_tool_correct_span_wrong": key_tool_correct_span_wrong,
-        "top_tool_wrong_span_correct": key_tool_wrong_span_correct,
     }
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse CLI arguments for dissociation analysis.
-
-    Args:
-        None.
-
-    Returns:
-        Parsed namespace.
-
-    Raises:
-        None.
-    """
-    parser = argparse.ArgumentParser(description="Run AgentXplain dissociation analysis")
-    parser.add_argument(
-        "--results",
-        type=Path,
-        required=True,
-        help="Path to input results JSON with agentshap_tool_correct and span_hit fields",
-    )
-    parser.add_argument(
-        "--save",
-        type=Path,
-        default=Path("results/dissociation_summary.json"),
-        help="Path to save dissociation summary JSON",
-    )
-    parser.add_argument("--verbose", action="store_true", help="Print top examples")
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(description="Run dissociation analysis")
+    parser.add_argument("--results", type=Path, required=True, help="Primary results JSON")
+    parser.add_argument("--baselines", type=Path, default=None, help="Baselines JSON (optional)")
+    parser.add_argument("--save", type=Path, default=Path("results/dissociation_summary.json"), help="Output JSON")
+    parser.add_argument("--verbose", action="store_true", help="Print details")
     return parser.parse_args()
 
 
 def main() -> None:
-    """CLI entrypoint for dissociation analysis.
-
-    Args:
-        None.
-
-    Returns:
-        None.
-
-    Raises:
-        OSError: If file read/write fails.
-    """
+    """CLI entrypoint."""
     args = parse_args()
     records = json.loads(args.results.read_text(encoding="utf-8"))
-    summary = analyze_dissociation(records)
+    summary = analyze(records)
 
-    matrix = summary["confusion_matrix"]["matrix"]
-    chi = summary["chi_squared"]
+    cm = summary["confusion_matrix"]
+    print("2x2 dissociation confusion matrix:")
+    print(f"  tool_correct_span_hit:  {cm['tool_correct_span_hit']}")
+    print(f"  tool_correct_span_miss: {cm['tool_correct_span_miss']}")
+    print(f"  tool_wrong_span_hit:    {cm['tool_wrong_span_hit']}")
+    print(f"  tool_wrong_span_miss:   {cm['tool_wrong_span_miss']}")
+    print(f"Chi-squared: {summary['chi2_statistic']:.4f}")
+    print(f"p-value: {summary['p_value']:.6f}")
 
-    print("=== Dissociation Matrix (rows: span_hit, cols: tool_correct) ===")
-    print(f"[True ] {matrix[0]}")
-    print(f"[False] {matrix[1]}")
-    print("\n=== Chi-squared Test ===")
-    print(f"chi2 = {chi['statistic']:.6f}")
-    print(f"p-value = {chi['p_value']:.6f}")
-    print(f"Interpretation: {chi['interpretation']}")
-
-    if args.verbose:
-        print("\nTop-10: tool_correct=True, span_hit=False")
-        for rec in summary["top_tool_correct_span_wrong"]:
-            print(f"- id={rec['id']} split={rec['split']} query={rec['query']}")
-
-        print("\nTop-10: tool_correct=False, span_hit=True")
-        for rec in summary["top_tool_wrong_span_correct"]:
-            print(f"- id={rec['id']} split={rec['split']} query={rec['query']}")
+    if args.verbose and cm["tool_wrong_span_hit"] == 0:
+        print("\nNo tool_wrong_span_hit cases found. Showing closest candidates (wrong tool):")
+        wrong_tool = [r for r in records if r.get("predicted_tool") != r.get("correct_tool")]
+        ranked = sorted(
+            wrong_tool,
+            key=lambda r: max([float(s) for _, s in r.get("attributions", {}).get("attention_rollout", [])[:10]] or [0.0]),
+            reverse=True,
+        )
+        for rec in ranked[:10]:
+            print(f"  id={rec.get('id')} split={rec.get('split')} query={str(rec.get('query',''))[:120]}")
 
     args.save.parent.mkdir(parents=True, exist_ok=True)
     args.save.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print(f"\nSaved dissociation summary to {args.save}")
+    print(f"Saved dissociation summary to {args.save}")
 
 
 if __name__ == "__main__":

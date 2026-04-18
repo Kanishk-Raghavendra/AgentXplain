@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -16,7 +18,9 @@ except ImportError:  # pragma: no cover
     AutoTokenizer = None
 
 
-TOOL_NAMES = ["web_search", "calculator", "code_executor"]
+TOOL_NAMES = ["web_search", "calculator", "code_executor", "none"]
+DEFAULT_ROUTER_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+ROUTER_MODEL_FALLBACKS = [DEFAULT_ROUTER_MODEL, "TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
 
 
 @dataclass
@@ -61,7 +65,7 @@ class AgentXplainAgent:
 
     def __init__(
         self,
-        model_name: str = "mistralai/Mistral-7B-Instruct-v0.2",
+        model_name: str = DEFAULT_ROUTER_MODEL,
         device: Optional[str] = None,
         use_mock_router: bool = False,
     ) -> None:
@@ -202,21 +206,82 @@ class AgentXplainAgent:
             None.
         """
         q = query.lower()
-        if any(token in q for token in ["calculate", "sum", "multiply", "divide", "+", "-", "*", "/"]):
+
+        # Negation split queries intentionally forbid tool usage and are labeled "none".
+        has_negation = any(token in q for token in ["do not", "don't", "without", "avoid", "not "])
+        has_tool_ref = any(
+            token in q
+            for token in [
+                "calculate",
+                "compute",
+                "arithmetic",
+                "search",
+                "lookup",
+                "web",
+                "code",
+                "python",
+                "execute",
+            ]
+        )
+        if has_negation and has_tool_ref:
+            tool = "none"
+            args = {"query": query}
+            reason = "Negated instruction detected; abstaining from tool call."
+            scores = {"calculator": 0.15, "web_search": 0.15, "code_executor": 0.15, "none": 1.0}
+        elif any(
+            token in q
+            for token in [
+                "calculate",
+                "sum",
+                "multiply",
+                "multiplied",
+                "times",
+                "product",
+                "percent",
+                "divide",
+                "arithmetic",
+                "evaluate",
+                "compute",
+                "equation",
+            ]
+        ) or re.search(r"\b\d+\s*[+\-*/]\s*\d+\b", q):
             tool = "calculator"
             args = {"expression": "".join(ch for ch in query if ch.isdigit() or ch in "+-*/(). ") or "1+1"}
             reason = "Arithmetic intent detected."
-            scores = {"calculator": 1.0, "web_search": 0.2, "code_executor": 0.1}
-        elif any(token in q for token in ["code", "python", "script", "execute", "function"]):
+            scores = {"calculator": 1.0, "web_search": 0.2, "code_executor": 0.1, "none": 0.05}
+        elif any(
+            token in q
+            for token in [
+                "python",
+                "execute",
+                "script",
+                "loop",
+                "function",
+                "print",
+                "run code",
+                "debug",
+                "program",
+                "implement",
+                "code",
+            ]
+        ):
             tool = "code_executor"
             args = {"code": "print('mock execution')"}
             reason = "Programming intent detected."
-            scores = {"calculator": 0.1, "web_search": 0.2, "code_executor": 1.0}
+            scores = {"calculator": 0.1, "web_search": 0.2, "code_executor": 1.0, "none": 0.05}
+        elif any(
+            token in q
+            for token in ["search", "latest", "news", "who", "when", "where", "lookup", "find", "current"]
+        ):
+            tool = "web_search"
+            args = {"query": query}
+            reason = "Information lookup intent detected."
+            scores = {"calculator": 0.2, "web_search": 1.0, "code_executor": 0.1, "none": 0.05}
         else:
             tool = "web_search"
             args = {"query": query}
             reason = "Information lookup intent detected."
-            scores = {"calculator": 0.2, "web_search": 1.0, "code_executor": 0.1}
+            scores = {"calculator": 0.2, "web_search": 1.0, "code_executor": 0.1, "none": 0.05}
 
         token_ids = [ord(ch) % 255 for ch in query][:128]
         seq = max(1, len(token_ids))
@@ -288,3 +353,72 @@ class AgentXplainAgent:
             attention_weights=attentions,
             tool_score_distribution=tool_scores,
         )
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for running one routing decision."""
+    parser = argparse.ArgumentParser(description="Run AgentXplain tool-routing on one query")
+    parser.add_argument("--query", type=str, required=True, help="User query to route")
+    parser.add_argument("--save", type=Path, required=True, help="Path to save trace JSON")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=DEFAULT_ROUTER_MODEL,
+        help="Local free model to try before fallback",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        help="Torch device (cpu/cuda). Defaults to cpu for portability.",
+    )
+    parser.add_argument(
+        "--use-mock-router",
+        action="store_true",
+        help="Force deterministic mock routing",
+    )
+    return parser.parse_args()
+
+
+def _build_agent_with_fallback(model_name: str, device: str, use_mock_router: bool) -> AgentXplainAgent:
+    """Build an agent, falling back to TinyLlama and then mock mode if needed."""
+    if use_mock_router:
+        print("Router mode: mock")
+        return AgentXplainAgent(model_name=model_name, device=device, use_mock_router=True)
+
+    tried: List[str] = []
+    for candidate in [model_name, *ROUTER_MODEL_FALLBACKS]:
+        if candidate in tried:
+            continue
+        tried.append(candidate)
+        try:
+            print(f"Router mode: model ({candidate})")
+            return AgentXplainAgent(model_name=candidate, device=device, use_mock_router=False)
+        except Exception as exc:  # pragma: no cover
+            print(f"Model load failed for {candidate}: {exc}")
+
+    print("Router mode: mock (fallback)")
+    return AgentXplainAgent(model_name=model_name, device=device, use_mock_router=True)
+
+
+def main() -> None:
+    """Run a single query and save the resulting trace JSON."""
+    args = parse_args()
+    agent = _build_agent_with_fallback(args.model, args.device, args.use_mock_router)
+    trace = agent.run(args.query)
+
+    args.save.parent.mkdir(parents=True, exist_ok=True)
+    payload = trace.to_dict()
+    payload["tool"] = trace.selected_tool
+    payload["selected_tool"] = trace.selected_tool
+    args.save.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    print(f"Query: {trace.query}")
+    print(f"Tool: {trace.selected_tool}")
+    print(f"Args: {json.dumps(trace.args, ensure_ascii=True)}")
+    print(f"Reason: {trace.reason}")
+    print(f"Saved trace: {args.save}")
+
+
+if __name__ == "__main__":
+    main()
