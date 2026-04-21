@@ -42,6 +42,40 @@ AgentXplain/
 └── README.md
 ```
 
+## Repository walkthrough
+
+`AgentXplain` is organized as a pipeline that starts from synthetic data generation and ends with attribution evaluation and figures:
+
+1. **Benchmark creation (`src/benchmark/generate.py`)**  
+   Builds synthetic traces with known trigger phrases and split labels (`standard`, `hard`, `paraphrase`, `negation`), then writes split-wise and full JSON datasets.
+
+2. **Tool-routing agent (`src/agent/agent.py`, `src/agent/tools.py`)**  
+   Routes each query to `web_search`, `calculator`, `code_executor`, or `none`.  
+   - In normal mode it uses a local Hugging Face causal LM and captures attention + tool logits.  
+   - In mock mode it uses deterministic heuristics (used heavily in tests and fallback paths).  
+   - `tools.py` provides safe mock implementations of the tools for reproducible local runs.
+
+3. **Attribution methods (`src/attribution/`)**  
+   Computes token-level explanations using:
+   - attention rollout,
+   - gradient × input saliency,
+   - token SHAP,
+   - contrastive attribution between selected vs alternative tools.
+
+4. **Faithfulness probes (`src/faithfulness/probes.py`)**  
+   Measures explanation quality via sufficiency and comprehensiveness style probes.
+
+5. **Experiment orchestration (`experiments/`)**  
+   - `run_benchmark.py`: runs routing + selected attribution methods + baselines and stores per-trace outputs.  
+   - `eval_metrics.py`: aggregates metrics across seeds/splits and computes p-values vs random baseline.  
+   - `dissociation_analysis.py`: analyzes mismatch between tool correctness and trigger-span localization.  
+   - `full_pipeline.py`: end-to-end runner wiring benchmark → experiment → metrics → dissociation → figures.
+
+6. **Visualization (`src/visualization/viz.py`)**  
+   Produces HTML token highlights, top-k token bar charts, and summary heatmaps from attribution outputs.
+
+Tests in `tests/` validate each stage independently (agent behavior, benchmark generation, attribution utilities, faithfulness probes, and full-pipeline orchestration).
+
 ## Setup
 
 Use a single local environment at `.venv/`.
